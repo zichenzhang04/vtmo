@@ -1,1 +1,1 @@
-# vtmo
+# VTMo: Unified Visuo-Tactile Transformer Encoder with Mixture-of-Modality-Experts
