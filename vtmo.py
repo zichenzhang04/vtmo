@@ -2,25 +2,22 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 from functools import partial
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
-from timm.models.registry import register_model
 from __future__ import print_function
-import numpy as np
-from skimage import color
 from PIL import Image
-import torchvision.datasets as datasets
 import os
-import random
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torch.utils.data import random_split
 from transformers import BeitModel
-from ptflops import get_model_complexity_info
 from torch.utils.data import DataLoader
 
 
+"""
+Part of the following code is adapted from VTMO - General-purpose Multimodal Pre-training
+https://github.com/zichenzhang04/unilm/tree/master/vlmo
+"""
 class Mlp(nn.Module):
     def __init__(
         self,
@@ -74,13 +71,13 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-
     def forward(self, x, mask=None, relative_position_bias=None):
         B, N, C = x.shape
 
         qkv_bias = None
         if self.q_bias is not None:
-            qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
+            qkv_bias = torch.cat((self.q_bias, torch.zeros_like(
+                self.v_bias, requires_grad=False), self.v_bias))
         qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
 
@@ -135,7 +132,8 @@ class Block(nn.Module):
             attn_drop=attn_drop,
             proj_drop=drop,
         )
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2_touch = norm_layer(dim)
         self.norm2_imag = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -162,31 +160,38 @@ class Block(nn.Module):
             self.norm2_vt = norm_layer(dim)
 
         self.gamma_1 = \
-            nn.Parameter(layer_scale_init_values * torch.ones((dim)),requires_grad=True) \
+            nn.Parameter(layer_scale_init_values * torch.ones((dim)), requires_grad=True) \
             if layer_scale_init_values is not None else 1.0
         self.gamma_2 = \
-            nn.Parameter(layer_scale_init_values * torch.ones((dim)),requires_grad=True) \
+            nn.Parameter(layer_scale_init_values * torch.ones((dim)), requires_grad=True) \
             if layer_scale_init_values is not None else 1.0
 
         self.max_text_len = max_text_len
 
     def forward(self, x, mask=None, modality_type=None, relative_position_bias=None):
         x = x + self.drop_path(self.gamma_1 * self.attn(self.norm1(x),
-                    mask=mask, relative_position_bias=relative_position_bias))
+                                                        mask=mask, relative_position_bias=relative_position_bias))
 
         if modality_type == "image":
-            x = x + self.drop_path(self.gamma_2 * self.mlp_imag(self.norm2_imag(x)))
+            x = x + self.drop_path(self.gamma_2 *
+                                   self.mlp_imag(self.norm2_imag(x)))
         elif modality_type == "touch":
-            x = x + self.drop_path(self.gamma_2 * self.mlp_touch(self.norm2_touch(x)))
+            x = x + self.drop_path(self.gamma_2 *
+                                   self.mlp_touch(self.norm2_touch(x)))
         else:
             if self.mlp_vl is None:
                 x_touch = x[:, : self.max_text_len]
-                x_imag = x[:, self.max_text_len :]
-                x_touch = x_touch + self.drop_path(self.gamma_2 * self.mlp_touch(self.norm2_touch(x_touch)))
-                x_imag = x_imag + self.drop_path(self.gamma_2 * self.mlp_imag(self.norm2_imag(x_imag)))
+                x_imag = x[:, self.max_text_len:]
+                x_touch = x_touch + \
+                    self.drop_path(
+                        self.gamma_2 * self.mlp_touch(self.norm2_touch(x_touch)))
+                x_imag = x_imag + \
+                    self.drop_path(
+                        self.gamma_2 * self.mlp_imag(self.norm2_imag(x_imag)))
                 x = torch.cat([x_touch, x_imag], dim=1)
             else:
-                x = x + self.drop_path(self.gamma_2 * self.mlp_vt(self.norm2_vt(x)))
+                x = x + self.drop_path(self.gamma_2 *
+                                       self.mlp_vt(self.norm2_vt(x)))
 
         return x
 
@@ -205,8 +210,10 @@ class PatchEmbed(nn.Module):
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
-        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
-        self.patch_shape = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
+        num_patches = (img_size[1] // patch_size[1]) * \
+            (img_size[0] // patch_size[0])
+        self.patch_shape = (
+            img_size[0] // patch_size[0], img_size[1] // patch_size[1])
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = num_patches
@@ -298,7 +305,8 @@ class MultiWayTransformer(nn.Module):
         self.num_heads = num_heads
         self.vlffn_start_layer_index = vlffn_start_layer_index
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim)) if self.use_abs_pos_emb else None
+        self.pos_embed = nn.Parameter(torch.zeros(
+            1, num_patches + 1, embed_dim)) if self.use_abs_pos_emb else None
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [
@@ -357,6 +365,7 @@ class MultiWayTransformer(nn.Module):
         x_mask = torch.ones(x.shape[0], x.shape[1])
 
         return x, x_mask
+
 
 class TouchFolderContrastive(Dataset):
     """Dataset for contrastive learning, pairing video and touch sensor frames."""
@@ -418,6 +427,7 @@ class TouchFolderContrastive(Dataset):
     def __len__(self):
         return len(self.data)
 
+
 def get_contrastive_loader(batch_size=32):
     data_folder = '/content/drive/MyDrive/touch_and_go_copy/'
 
@@ -432,9 +442,12 @@ def get_contrastive_loader(batch_size=32):
         normalize,
     ])
 
-    train_dataset = TouchFolderContrastive(data_folder, transform=transform, split='train')
-    val_dataset = TouchFolderContrastive(data_folder, transform=transform, split='val')
-    test_dataset = TouchFolderContrastive(data_folder, transform=transform, split='test')
+    train_dataset = TouchFolderContrastive(
+        data_folder, transform=transform, split='train')
+    val_dataset = TouchFolderContrastive(
+        data_folder, transform=transform, split='val')
+    test_dataset = TouchFolderContrastive(
+        data_folder, transform=transform, split='test')
 
     print(f'Number of train samples: {len(train_dataset)}')
     print(f'Number of val samples: {len(val_dataset)}')
@@ -454,8 +467,10 @@ def get_contrastive_loader(batch_size=32):
 
     return train_loader, val_loader, test_loader
 
+
 # Get the train and validation loaders
 train_loader, val_loader, test_loader = get_contrastive_loader()
+
 # Define InfoNCE Loss
 class InfoNCELoss(nn.Module):
     def __init__(self, temperature=0.07):
@@ -483,16 +498,21 @@ class MultiWayTransformerWithInfoNCELoss(MultiWayTransformer):
         super().__init__(*args, **kwargs)
 
         # Load Beit-base model
-        beit_base = BeitModel.from_pretrained("microsoft/beit-base-patch16-224")
+        beit_base = BeitModel.from_pretrained(
+            "microsoft/beit-base-patch16-224")
         beit_state_dict = beit_base.state_dict()
 
         # Copy weights for the fully connected networks in each block
         for layer_idx, block in enumerate(self.blocks):
             # Access corresponding FC weights from Beit-base
-            beit_fc1_weight = beit_state_dict[f"encoder.layer.{layer_idx}.intermediate.dense.weight"]
-            beit_fc1_bias = beit_state_dict[f"encoder.layer.{layer_idx}.intermediate.dense.bias"]
-            beit_fc2_weight = beit_state_dict[f"encoder.layer.{layer_idx}.output.dense.weight"]
-            beit_fc2_bias = beit_state_dict[f"encoder.layer.{layer_idx}.output.dense.bias"]
+            beit_fc1_weight = beit_state_dict[f"encoder.layer.{
+                layer_idx}.intermediate.dense.weight"]
+            beit_fc1_bias = beit_state_dict[f"encoder.layer.{
+                layer_idx}.intermediate.dense.bias"]
+            beit_fc2_weight = beit_state_dict[f"encoder.layer.{
+                layer_idx}.output.dense.weight"]
+            beit_fc2_bias = beit_state_dict[f"encoder.layer.{
+                layer_idx}.output.dense.bias"]
 
             # Assign the same weights to the image, touch, and (if exists) vl FC layers in your model
             for fc_network in [block.mlp_imag, block.mlp_touch, block.mlp_vt if block.mlp_vt else block.mlp_imag]:
@@ -523,296 +543,3 @@ class MultiWayTransformerWithInfoNCELoss(MultiWayTransformer):
         touch_out = self.norm(touch_emb[:, 0])
 
         return img_out, touch_out
-
-# Initialize model, optimizer, and InfoNCE loss
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = MultiWayTransformerWithInfoNCELoss().to(device)
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
-info_nce_loss = InfoNCELoss(temperature=0.07)
-
-# Path to save the best model
-best_model_path = '/content/drive/MyDrive/best_vtmo_model.pth'
-
-# Initialize model, optimizer, and InfoNCE loss
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = MultiWayTransformerWithInfoNCELoss().to(device)
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
-info_nce_loss = InfoNCELoss(temperature=0.07)
-
-# Load the best model if it exists
-if os.path.exists(best_model_path):
-    model.load_state_dict(torch.load(best_model_path, map_location=device))
-    print("Loaded the best model from memory.")
-
-# Training loop with model saving
-num_epochs = 15
-best_val_loss = float('inf')
-
-for epoch in range(num_epochs):
-    model.train()
-    for concatenated_img, _ in train_loader:
-        # Split the concatenated images into separate image and touch sensor parts
-        img, touch_img = torch.chunk(concatenated_img, 2, dim=1)
-        img, touch_img = img.to(device), touch_img.to(device)
-
-        # Forward pass
-        img_out, touch_out = model(img, touch_img)
-
-        # Compute InfoNCE loss
-        loss = info_nce_loss(img_out, touch_out)
-
-        # Backward pass and optimization
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-    print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}")
-
-    # Validation loop with model saving
-    model.eval()
-    val_loss = 0
-    with torch.no_grad():
-        for concatenated_img, _ in val_loader:
-            img, touch_img = torch.chunk(concatenated_img, 2, dim=1)
-            img, touch_img = img.to(device), touch_img.to(device)
-
-            img_out, touch_out = model(img, touch_img)
-            val_loss += info_nce_loss(img_out, touch_out).item()
-
-    val_loss /= len(val_loader)
-    print(f"Validation Loss: {val_loss:.4f}")
-
-    # Save the model if validation loss is the best we've seen so far
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        torch.save(model.state_dict(), best_model_path)
-        print(f"Best model saved with validation loss: {best_val_loss:.4f}")
-
-# Path to the saved best model
-best_model_path = '/content/drive/MyDrive/best_vtmo_model.pth'
-
-# Initialize the model and load the best model weights if available
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = MultiWayTransformerWithInfoNCELoss().to(device)
-
-if torch.cuda.is_available():
-    model.load_state_dict(torch.load(best_model_path))
-else:
-    model.load_state_dict(torch.load(best_model_path, map_location=device))
-
-print("Loaded the best validation model for testing.")
-
-# Set the model to evaluation mode
-model.eval()
-
-# Initialize counters for accuracy
-correct_matches = 0
-total_samples = 0
-temperature = 0.07  # Use the same temperature as in training
-
-with torch.no_grad():
-    for concatenated_img, _ in test_loader:  # Assuming `test_loader` is defined
-        # Split the concatenated images into separate image and touch sensor parts
-        img, touch_img = torch.chunk(concatenated_img, 2, dim=1)
-        img, touch_img = img.to(device), touch_img.to(device)
-
-        # Forward pass
-        img_out, touch_out = model(img, touch_img)
-
-        # Normalize outputs to calculate cosine similarity
-        img_out = F.normalize(img_out, dim=-1)
-        touch_out = F.normalize(touch_out, dim=-1)
-
-        # Calculate cosine similarity matrix (batch_size x batch_size)
-        similarity_matrix = torch.matmul(img_out, touch_out.T) / temperature
-
-        # For each image, check if the highest similarity is with the correct tactile pair
-        batch_size = similarity_matrix.size(0)
-        total_samples += batch_size
-
-        # Find the indices of the maximum values along each row (prediction)
-        predicted_indices = similarity_matrix.argmax(dim=1)
-
-        # Check if each prediction is the correct index
-        correct_matches += (predicted_indices == torch.arange(batch_size, device=device)).sum().item()
-
-# Calculate accuracy
-accuracy = correct_matches / total_samples
-print(f"Test Accuracy: {accuracy * 100:.2f}%")
-
-# !pip install ptflops
-
-# Define a wrapper for compatibility with ptflops
-class MultiWayTransformerWrapper(nn.Module):
-    def __init__(self, model):
-        super(MultiWayTransformerWrapper, self).__init__()
-        self.model = model
-
-    def forward(self, x):
-        # Split the input tensor into `img` and `touch_img`
-        img, touch_img = torch.chunk(x, 2, dim=1)
-        return self.model(img, touch_img)
-
-# Initialize the original model and the wrapper
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = MultiWayTransformerWithInfoNCELoss().to(device)
-model_wrapper = MultiWayTransformerWrapper(model).to(device)
-
-# Define the input shape: concatenating two inputs of shape (3, 224, 224) along the channel dimension
-input_shape = (6, 224, 224)  # Concatenate img and touch_img channels
-
-# Calculate FLOPs and Params using the wrapper
-with torch.cuda.device(0):
-    flops, params = get_model_complexity_info(model_wrapper, input_shape, as_strings=True, print_per_layer_stat=True)
-
-print(f"FLOPs: {flops}")
-print(f"Parameters: {params}")
-
-# Now use the same methods and loss to train a model that consists of two encoders (initialized from Beit-base).
-
-# Define the model with two Beit-based encoders
-class DualEncoderModel(nn.Module):
-    def __init__(self):
-        super(DualEncoderModel, self).__init__()
-
-        # Initialize two Beit-base models as encoders
-        self.img_encoder = BeitModel.from_pretrained("microsoft/beit-base-patch16-224")
-        self.touch_encoder = BeitModel.from_pretrained("microsoft/beit-base-patch16-224")
-
-    def forward(self, img, touch_img):
-        # Get CLS token embeddings from both encoders
-        img_outputs = self.img_encoder(img)
-        touch_outputs = self.touch_encoder(touch_img)
-
-        # Extract the CLS token as the final representation
-        img_out = img_outputs.last_hidden_state[:, 0]  # CLS token for visual image
-        touch_out = touch_outputs.last_hidden_state[:, 0]  # CLS token for tactile image
-
-        return img_out, touch_out
-
-# Initialize model, optimizer, and InfoNCE loss
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = DualEncoderModel().to(device)
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
-info_nce_loss = InfoNCELoss(temperature=0.07)
-
-# Path to save the best model
-best_model_path = '/content/drive/MyDrive/best_dual_encoder_model.pth'
-
-# Training loop with model saving
-num_epochs = 15
-best_val_loss = float('inf')
-
-for epoch in range(num_epochs):
-    model.train()
-    for concatenated_img, _ in train_loader:  # Assuming train_loader is defined
-        # Split the concatenated images into separate image and touch sensor parts
-        img, touch_img = torch.chunk(concatenated_img, 2, dim=1)
-        img, touch_img = img.to(device), touch_img.to(device)
-
-        # Forward pass
-        img_out, touch_out = model(img, touch_img)
-
-        # Compute InfoNCE loss
-        loss = info_nce_loss(img_out, touch_out)
-
-        # Backward pass and optimization
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-
-    print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}")
-
-    # Validation loop with model saving
-    model.eval()
-    val_loss = 0
-    with torch.no_grad():
-        for concatenated_img, _ in val_loader:  # Assuming val_loader is defined
-            img, touch_img = torch.chunk(concatenated_img, 2, dim=1)
-            img, touch_img = img.to(device), touch_img.to(device)
-
-            img_out, touch_out = model(img, touch_img)
-            val_loss += info_nce_loss(img_out, touch_out).item()
-
-    val_loss /= len(val_loader)
-    print(f"Validation Loss: {val_loss:.4f}")
-
-    # Save the model if validation loss is the best we've seen so far
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        torch.save(model.state_dict(), best_model_path)
-        print(f"Best model saved with validation loss: {best_val_loss:.4f}")
-
-
-# Initialize the model and load the best model weights if available
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-if torch.cuda.is_available():
-    model.load_state_dict(torch.load(best_model_path))
-else:
-    model.load_state_dict(torch.load(best_model_path, map_location=device))
-
-print("Loaded the best validation model for testing.")
-
-# Set the model to evaluation mode
-model.eval()
-
-# Initialize counters for accuracy
-correct_matches = 0
-total_samples = 0
-temperature = 0.07  # Use the same temperature as in training
-
-with torch.no_grad():
-    for concatenated_img, _ in test_loader:  # Assuming `test_loader` is defined
-        # Split the concatenated images into separate image and touch sensor parts
-        img, touch_img = torch.chunk(concatenated_img, 2, dim=1)
-        img, touch_img = img.to(device), touch_img.to(device)
-
-        # Forward pass
-        img_out, touch_out = model(img, touch_img)
-
-        # Normalize outputs to calculate cosine similarity
-        img_out = F.normalize(img_out, dim=-1)
-        touch_out = F.normalize(touch_out, dim=-1)
-
-        # Calculate cosine similarity matrix (batch_size x batch_size)
-        similarity_matrix = torch.matmul(img_out, touch_out.T) / temperature
-
-        # For each image, check if the highest similarity is with the correct tactile pair
-        batch_size = similarity_matrix.size(0)
-        total_samples += batch_size
-
-        # Find the indices of the maximum values along each row (prediction)
-        predicted_indices = similarity_matrix.argmax(dim=1)
-
-        # Check if each prediction is the correct index
-        correct_matches += (predicted_indices == torch.arange(batch_size, device=device)).sum().item()
-
-# Calculate accuracy
-accuracy = correct_matches / total_samples
-print(f"Test Accuracy: {accuracy * 100:.2f}%")
-
-# Define a wrapper for compatibility with ptflops
-class DualEncoderWrapper(nn.Module):
-    def __init__(self, model):
-        super(DualEncoderWrapper, self).__init__()
-        self.model = model
-
-    def forward(self, x):
-        # Split the input tensor into `img` and `touch_img`
-        img, touch_img = torch.chunk(x, 2, dim=1)
-        return self.model(img, touch_img)
-
-# Initialize the DualEncoderModel and the wrapper
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = DualEncoderModel().to(device)
-model_wrapper = DualEncoderWrapper(model).to(device)
-
-# Define the input shape: concatenating two inputs of shape (3, 224, 224) along the channel dimension
-input_shape = (6, 224, 224)  # Concatenate img and touch_img channels
-
-# Calculate FLOPs and Params using the wrapper
-with torch.cuda.device(0):
-    flops, params = get_model_complexity_info(model_wrapper, input_shape, as_strings=True, print_per_layer_stat=True)
-
-print(f"FLOPs: {flops}")
